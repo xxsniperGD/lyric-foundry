@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 
 const STRUCTURES = [
   { label: 'Classic Pop', value: 'Verse → Chorus → Verse → Chorus → Bridge → Chorus' },
@@ -36,6 +36,89 @@ const LOADING_PHRASES = [
   'humming through the bridge',
   'pressing the master',
 ];
+
+const REMIX_LOADING_PHRASES = [
+  'unspooling the tape',
+  'punching in new takes',
+  'fading the verse',
+  'remastering',
+];
+
+const SUBJECT_FALLBACK = [
+  "A late drive home from a wedding you weren't invited to.",
+  "The exact moment a long friendship ended without anyone saying it out loud.",
+  "The way your father's voicemail still says 'we'll talk soon'.",
+  "Watching your mother teach your niece to bake — the same flour-streaked apron.",
+  "Reading a text you sent at 3 AM and not deleting it.",
+  "The smell of someone else's washing in your machine after they've moved out.",
+  "The brief silence in a fight before someone laughs.",
+  "The cat sleeping in the only patch of sun on the kitchen floor.",
+  "The bus you took to your first job, still running the same route.",
+  "A girl learning to drive stick in a church parking lot.",
+  "An old voicemail from a number you don't recognise anymore.",
+  "Sitting in a parked car after the song ends, not getting out.",
+  "The petrol-station coffee you both used to hate.",
+  "The lights in the windows of houses you'll never live in.",
+  "An apology you rehearsed for years and never said.",
+  "The dog that learned to wait by the door at exactly 5:30.",
+  "A summer where nothing important happened, and that was the point.",
+  "Finding a birthday card you never sent.",
+  "The night your grandmother taught you to dance in the kitchen.",
+  "The street you can't drive down anymore without crying.",
+  "An ex-lover's coat you still wear sometimes.",
+  "The smell of rain on the corrugated iron of your childhood roof.",
+  "Watching strangers fall asleep on a long flight.",
+  "The pause before someone says 'we should talk'.",
+  "A song on the radio that nobody at the party knows except you.",
+  "The drive to a funeral with the air-con broken.",
+  "A polaroid you keep in a drawer for no reason.",
+  "The version of yourself who almost stayed.",
+];
+
+async function suggestSubject(providerId, apiKey) {
+  const provider = PROVIDERS[providerId];
+  const sysPrompt = 'You suggest evocative song subjects for songwriters.';
+  const userPrompt = `Suggest a single fresh, concrete, image-rich song subject (one sentence, 8-22 words). It should hint at a specific scene or feeling, not state an emotion. Avoid clichés like "broken heart", "endless night", "ride or die". Avoid topics you have already suggested. Output ONLY the subject sentence — no quotes, no preamble, no list.`;
+  try {
+    if (provider.id === 'gemini') {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${provider.model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: userPrompt }] }],
+          generationConfig: { temperature: 1.1, maxOutputTokens: 120, thinkingConfig: { thinkingBudget: 0 } },
+        }),
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      const text = (data?.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('').trim();
+      return text || null;
+    }
+    const url = provider.id === 'groq'
+      ? 'https://api.groq.com/openai/v1/chat/completions'
+      : 'https://api.openai.com/v1/chat/completions';
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: provider.model,
+        messages: [
+          { role: 'system', content: sysPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 1.1,
+        max_tokens: 120,
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const text = (data?.choices?.[0]?.message?.content || '').trim();
+    return text || null;
+  } catch {
+    return null;
+  }
+}
 
 const PROVIDERS = {
   gemini: {
@@ -434,6 +517,11 @@ export default function SunoLyricsCreator() {
   const [rateLimitedProvider, setRateLimitedProvider] = useState(null);
   const [keyValidation, setKeyValidation] = useState({});
   const [showWizard, setShowWizard] = useState(false);
+  const [suggestingTheme, setSuggestingTheme] = useState(false);
+  const [showRemix, setShowRemix] = useState(false);
+  const [remixNotes, setRemixNotes] = useState('');
+  const [remixing, setRemixing] = useState(false);
+  const resultTopRef = useRef(null);
 
   useEffect(() => {
     try {
@@ -465,14 +553,22 @@ export default function SunoLyricsCreator() {
   const isAtSoftLimit = activeProvider.softDailyLimit != null && todayCount >= activeProvider.softDailyLimit;
 
   useEffect(() => {
-    if (!loading) return;
+    if (!loading && !remixing) return;
+    const pool = remixing ? REMIX_LOADING_PHRASES : LOADING_PHRASES;
+    setLoadingPhrase(pool[0]);
     let i = 0;
     const interval = setInterval(() => {
-      i = (i + 1) % LOADING_PHRASES.length;
-      setLoadingPhrase(LOADING_PHRASES[i]);
+      i = (i + 1) % pool.length;
+      setLoadingPhrase(pool[i]);
     }, 1400);
     return () => clearInterval(interval);
-  }, [loading]);
+  }, [loading, remixing]);
+
+  useEffect(() => {
+    if (result && resultTopRef.current) {
+      resultTopRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [result]);
 
   const pickRandom = (arr) => arr[Math.floor(Math.random() * arr.length)];
   const toggleIn = (list, value) =>
@@ -545,6 +641,87 @@ export default function SunoLyricsCreator() {
       saveUsage(next);
       return next;
     });
+  };
+
+  const surpriseTheme = async () => {
+    if (!activeKey) {
+      setTheme(pickRandom(SUBJECT_FALLBACK));
+      return;
+    }
+    setSuggestingTheme(true);
+    try {
+      const ai = await suggestSubject(provider, activeKey);
+      setTheme(ai && ai.length > 0 ? ai.replace(/^["']|["']$/g, '').trim() : pickRandom(SUBJECT_FALLBACK));
+      bumpUsage();
+    } catch {
+      setTheme(pickRandom(SUBJECT_FALLBACK));
+    } finally {
+      setSuggestingTheme(false);
+    }
+  };
+
+  const runRemix = async () => {
+    if (!result || !remixNotes.trim()) return;
+    if (!activeKey) {
+      setError('Add an API key first to remix.');
+      return;
+    }
+    setError('');
+    setRemixing(true);
+    try {
+      const allGenres = mergedUnique(genres, customGenres);
+      const allMoods = mergedUnique(moods, customMoods);
+      const allStructures = customStructure.trim() ? [...structures, customStructure.trim()] : structures;
+      const basePrompt = buildPrompt({
+        theme,
+        genres: allGenres,
+        moods: allMoods,
+        structures: allStructures,
+        notes,
+        styleSetsTone,
+      });
+      const remixPrompt = `${basePrompt}
+
+EXISTING SONG TO REMIX — keep the spirit but apply the writer's remix instructions below:
+
+CURRENT TITLE: ${result.title}
+
+CURRENT LYRICS:
+${result.lyrics}
+
+CURRENT STYLE PROMPT: ${result.stylePrompt}
+
+REMIX INSTRUCTIONS FROM THE WRITER:
+${remixNotes.trim()}
+
+Now rewrite the FULL song honoring those instructions. Don't tinker — actually take the note seriously. Keep the same JSON output format.`;
+      const callRes = await callLLM(provider, activeKey, remixPrompt);
+      if (!callRes.ok) {
+        if (callRes.status === 429) {
+          setRateLimitedProvider(provider);
+          throw new Error(`Rate-limited on ${activeProvider.label}. Try another provider or wait.`);
+        }
+        throw new Error(`${activeProvider.label} returned ${callRes.status}.`);
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(callRes.text);
+      } catch {
+        if (callRes.finishReason === 'MAX_TOKENS' || callRes.finishReason === 'length') {
+          throw new Error('Remix got cut off mid-line. Try fewer or shorter remix instructions.');
+        }
+        throw new Error('Remix returned malformed JSON. Try again.');
+      }
+      setResult(parsed);
+      bumpUsage();
+      setShowRemix(false);
+      setRemixNotes('');
+    } catch (e) {
+      console.error(e);
+      setError(e.message || 'Remix failed. Try again.');
+    } finally {
+      setRemixing(false);
+    }
   };
 
   const generate = async () => {
@@ -1183,6 +1360,68 @@ export default function SunoLyricsCreator() {
           .remaining-card { flex-direction: column; align-items: flex-start; }
           .remaining-right { align-items: flex-start; text-align: left; }
         }
+
+        .remix-btn { color: var(--orange); border-color: var(--orange); }
+        .remix-btn:hover {
+          background: var(--orange) !important;
+          color: var(--cream) !important;
+          border-color: var(--orange) !important;
+        }
+        .remix-btn.remix-active {
+          background: var(--orange);
+          color: var(--cream);
+          border-color: var(--orange);
+        }
+
+        .remix-panel {
+          margin-top: 1.4rem;
+          padding: 1.4rem 1.5rem;
+          background: var(--cream-deep);
+          border: 1.5px solid var(--orange);
+          border-radius: 18px;
+          display: flex; flex-direction: column; gap: 0.9rem;
+          animation: fade-in 0.4s ease-out both;
+        }
+        .remix-head { display: flex; flex-direction: column; gap: 0.3rem; }
+        .remix-eyebrow {
+          font-family: 'Poppins', sans-serif;
+          font-size: 0.72rem;
+          letter-spacing: 0.18em;
+          text-transform: uppercase;
+          color: var(--orange);
+          font-weight: 600;
+        }
+        .remix-sub {
+          font-family: 'Lora', Georgia, serif;
+          font-style: italic;
+          font-size: 0.92rem;
+          color: var(--dark);
+          opacity: 0.8;
+        }
+        .remix-textarea {
+          background: var(--cream);
+        }
+        .remix-chips {
+          display: flex; flex-wrap: wrap; gap: 0.35rem;
+        }
+        .remix-chip {
+          font-family: 'Poppins', sans-serif;
+          font-size: 0.76rem;
+          font-weight: 500;
+          padding: 0.35rem 0.75rem;
+          border: 1px solid var(--light-gray);
+          background: var(--cream);
+          color: var(--dark);
+          border-radius: 999px;
+          cursor: pointer;
+          transition: all 0.18s ease;
+        }
+        .remix-chip:hover { border-color: var(--orange); color: var(--orange); }
+        .remix-chip:disabled { opacity: 0.5; cursor: not-allowed; }
+        .remix-actions {
+          display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;
+        }
+        .remix-go { padding: 0.75rem 1.4rem !important; font-size: 0.92rem !important; }
 
         .hero { margin-bottom: 2.4rem; position: relative; }
         .hero-eyebrow {
@@ -1965,7 +2204,17 @@ export default function SunoLyricsCreator() {
                     <div className="step-num">01 · The Subject</div>
                     <div className="step-title">What is this song about?</div>
                   </div>
-                  <div className="step-hint">required</div>
+                  <div className="step-actions">
+                    <button
+                      className="surprise-btn"
+                      onClick={surpriseTheme}
+                      disabled={suggestingTheme}
+                      title={activeKey ? 'Ask the AI for a fresh song subject' : 'Pick a random subject from a curated list (no key needed)'}
+                    >
+                      {suggestingTheme ? '✦ thinking…' : (activeKey ? '✦ surprise me (AI)' : '✦ surprise me')}
+                    </button>
+                    <span className="step-hint">required</span>
+                  </div>
                 </div>
                 <textarea
                   className="field-textarea"
@@ -2241,6 +2490,7 @@ export default function SunoLyricsCreator() {
 
           {result && (
             <>
+              <div ref={resultTopRef} style={{ scrollMarginTop: '1rem' }} />
               <div style={{
                 display: 'flex',
                 justifyContent: 'space-between',
@@ -2305,11 +2555,77 @@ export default function SunoLyricsCreator() {
                   <button
                     className="btn-ghost"
                     onClick={generate}
-                    disabled={loading}
+                    disabled={loading || remixing}
                   >
                     {loading ? 'Re-composing…' : '↻ Regenerate'}
                   </button>
+                  <button
+                    className={`btn-ghost remix-btn ${showRemix ? 'remix-active' : ''}`}
+                    onClick={() => setShowRemix((v) => !v)}
+                    disabled={loading || remixing}
+                  >
+                    {showRemix ? '× Close remix' : '✦ Remix'}
+                  </button>
                 </div>
+
+                {showRemix && (
+                  <div className="remix-panel">
+                    <div className="remix-head">
+                      <div className="remix-eyebrow">Remix this song</div>
+                      <div className="remix-sub">
+                        Tell the model what to change — it'll rewrite the full song keeping the same subject, genre, and structure unless you say otherwise.
+                      </div>
+                    </div>
+                    <textarea
+                      className="field-textarea remix-textarea"
+                      rows={3}
+                      placeholder="e.g. make verse 2 darker · swap the bridge for an instrumental break · add ad-libs · stronger imagery in the chorus · change vantage point to second person · cut the outro"
+                      value={remixNotes}
+                      onChange={(e) => setRemixNotes(e.target.value)}
+                    />
+                    <div className="remix-chips">
+                      {[
+                        'make it darker',
+                        'make it more hopeful',
+                        'add a bridge',
+                        'cut the bridge',
+                        'switch to second person',
+                        'stronger imagery in the chorus',
+                        'shorter lines',
+                        'add ad-libs',
+                        'more conversational diction',
+                        'rewrite verse 2 only',
+                      ].map((q) => (
+                        <button
+                          key={q}
+                          className="remix-chip"
+                          onClick={() =>
+                            setRemixNotes((cur) => (cur.trim() ? `${cur.trim()}, ${q}` : q))
+                          }
+                          disabled={remixing}
+                        >
+                          + {q}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="remix-actions">
+                      <button
+                        className="btn-primary remix-go"
+                        onClick={runRemix}
+                        disabled={remixing || !remixNotes.trim()}
+                      >
+                        {remixing ? `Remixing… ${loadingPhrase}` : 'Remix this song'}
+                      </button>
+                      <button
+                        className="btn-ghost"
+                        onClick={() => setRemixNotes('')}
+                        disabled={remixing || !remixNotes}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="footer-note">
