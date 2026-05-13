@@ -603,6 +603,90 @@ export default function SunoLyricsCreator() {
         }
         .key-meta-row span.saved { color: var(--green); font-weight: 600; }
 
+        .key-warn {
+          margin-top: 0.6rem;
+          padding: 1.1rem 1.2rem 0.95rem;
+          background: rgba(217, 119, 87, 0.07);
+          border: 1px solid rgba(217, 119, 87, 0.35);
+          border-left: 3px solid var(--orange);
+          border-radius: 12px;
+        }
+        .key-warn-head {
+          font-family: 'Poppins', sans-serif;
+          font-size: 0.82rem;
+          font-weight: 700;
+          color: var(--orange-deep);
+          letter-spacing: 0.02em;
+          display: flex;
+          align-items: center;
+          gap: 0.55rem;
+          margin-bottom: 0.7rem;
+        }
+        .warn-badge {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 20px;
+          height: 20px;
+          border-radius: 50%;
+          background: var(--orange);
+          color: var(--cream);
+          font-family: 'Poppins', sans-serif;
+          font-weight: 700;
+          font-size: 0.85rem;
+          line-height: 1;
+          flex-shrink: 0;
+        }
+        .key-warn ul {
+          list-style: none;
+          margin: 0;
+          padding: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 0.55rem;
+        }
+        .key-warn li {
+          font-family: 'Lora', Georgia, serif;
+          font-size: 0.92rem;
+          line-height: 1.55;
+          color: var(--dark);
+          padding-left: 1.2rem;
+          position: relative;
+        }
+        .key-warn li::before {
+          content: '';
+          position: absolute;
+          left: 0;
+          top: 0.65em;
+          width: 6px;
+          height: 2px;
+          background: var(--orange);
+        }
+        .key-warn li strong {
+          font-family: 'Poppins', sans-serif;
+          font-weight: 600;
+        }
+        .key-warn code {
+          font-family: 'Poppins', sans-serif;
+          font-size: 0.85rem;
+          background: var(--cream-deep);
+          padding: 0.05rem 0.35rem;
+          border-radius: 4px;
+        }
+        .key-warn a {
+          color: var(--orange-deep);
+          font-weight: 600;
+        }
+        .key-warn-foot {
+          margin: 0.9rem 0 0 !important;
+          font-family: 'Lora', Georgia, serif;
+          font-size: 0.82rem !important;
+          font-style: italic;
+          color: var(--mid) !important;
+          opacity: 1 !important;
+          line-height: 1.55;
+        }
+
         .hero { margin-bottom: 2.4rem; position: relative; }
         .hero-eyebrow {
           font-family: 'Poppins', sans-serif; font-size: 0.78rem;
@@ -1150,7 +1234,7 @@ export default function SunoLyricsCreator() {
               <h3>Your Gemini API Key {apiKey ? '' : '— required'}</h3>
               <p>
                 This app runs on your own Gemini key, called directly from your browser. The key is stored only in your
-                browser's localStorage and is never sent to any server I control. Get a free key at{' '}
+                browser's localStorage and is never sent to any server controlled by this site. Get a free key at{' '}
                 <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">
                   aistudio.google.com/app/apikey
                 </a>{' '}
@@ -1179,6 +1263,46 @@ export default function SunoLyricsCreator() {
               <div className="key-meta-row">
                 <span>Stored in your browser only.</span>
                 {apiKey && <span className="saved">✓ Key active · {keyPreview}</span>}
+              </div>
+
+              <div className="key-warn">
+                <div className="key-warn-head">
+                  <span className="warn-badge">!</span>
+                  Before you paste a key, read this
+                </div>
+                <ul>
+                  <li>
+                    <strong>Treat the key like a password.</strong> Anyone who gets it can spend your Gemini quota
+                    (and rack up real charges if you've enabled billing on your Google Cloud project).
+                  </li>
+                  <li>
+                    <strong>Don't use a shared or public computer.</strong> The key sits in <code>localStorage</code>,
+                    so anyone with access to this browser profile — or to the DevTools — can read it. Hit{' '}
+                    <strong>Clear</strong> before you walk away.
+                  </li>
+                  <li>
+                    <strong>Browser extensions can in theory read it.</strong> Same as on a banking site — a malicious
+                    extension with access to this page could exfiltrate any in-page secret. Only paste a key into
+                    browsers you trust.
+                  </li>
+                  <li>
+                    <strong>Use a free-tier key, not a billing-enabled one.</strong> Google's free tier on{' '}
+                    <em>gemini-2.5-flash</em> has rate limits but won't charge you. If you ever enable Cloud billing,
+                    misuse of a leaked key can cost real money.
+                  </li>
+                  <li>
+                    <strong>If something feels off, revoke immediately.</strong> Go to{' '}
+                    <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">
+                      aistudio.google.com/app/apikey
+                    </a>{' '}
+                    and delete the key. A new one takes ten seconds to generate.
+                  </li>
+                </ul>
+                <p className="key-warn-foot">
+                  By saving a key here, you accept that this app is provided as-is with no warranty. The key never
+                  leaves your browser and is sent only to Google's official Gemini endpoint — but the security of your
+                  device, your browser, and your key is your responsibility.
+                </p>
               </div>
             </div>
           )}
