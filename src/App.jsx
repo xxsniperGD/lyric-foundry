@@ -956,7 +956,7 @@ export default function SunoLyricsCreator() {
               <div className="generate-block">
                 <div className="generate-block-text">
                   <h3>Press the lever.</h3>
-                  <p>Claude writes the lyrics. You take them to Suno.</p>
+                  <p>Gemini writes the lyrics. You take them to Suno.</p>
                 </div>
                 <button
                   className="btn-primary"
@@ -1009,7 +1009,7 @@ export default function SunoLyricsCreator() {
                   </div>
                   <h2 className="release-title">{result.title}</h2>
                   <div className="release-meta">
-                    Written by Claude · {genre || 'open genre'}
+                    Written by Gemini · {genre || 'open genre'}
                     {mood && ` · ${mood}`}
                   </div>
                 </div>
@@ -1068,7 +1068,7 @@ export default function SunoLyricsCreator() {
 
           <div className="footer-bar">
             <span>Lyric Foundry</span>
-            <span>Words by Claude<span className="heart-dot" />Songs by you</span>
+            <span>Words by Gemini<span className="heart-dot" />Songs by you</span>
             <span>Pretoria · {new Date().getFullYear()}</span>
           </div>
 

@@ -1,6 +1,6 @@
 export const config = { runtime: 'edge' };
 
-const MODEL = 'claude-sonnet-4-5';
+const MODEL = 'gemini-2.5-flash';
 
 function buildPrompt({ theme, genre, mood, structure, notes }) {
   return `Write song lyrics formatted for Suno AI.
@@ -38,9 +38,9 @@ export default async function handler(req) {
     return new Response('Method not allowed', { status: 405 });
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    return new Response('Server is missing ANTHROPIC_API_KEY', { status: 500 });
+    return new Response('Server is missing GEMINI_API_KEY', { status: 500 });
   }
 
   let body;
@@ -55,17 +55,27 @@ export default async function handler(req) {
     return new Response('Missing "theme"', { status: 400 });
   }
 
-  const upstream = await fetch('https://api.anthropic.com/v1/messages', {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+  const upstream = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 2000,
-      messages: [{ role: 'user', content: buildPrompt({ theme, genre, mood, structure, notes }) }],
+      contents: [{ parts: [{ text: buildPrompt({ theme, genre, mood, structure, notes }) }] }],
+      generationConfig: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: 'OBJECT',
+          properties: {
+            title: { type: 'STRING' },
+            lyrics: { type: 'STRING' },
+            stylePrompt: { type: 'STRING' },
+          },
+          required: ['title', 'lyrics', 'stylePrompt'],
+        },
+        maxOutputTokens: 4096,
+        temperature: 0.95,
+      },
     }),
   });
 
@@ -75,9 +85,8 @@ export default async function handler(req) {
   }
 
   const data = await upstream.json();
-  const text = (data.content || [])
-    .filter((b) => b.type === 'text')
-    .map((b) => b.text)
+  const text = (data?.candidates?.[0]?.content?.parts || [])
+    .map((p) => p.text || '')
     .join('')
     .replace(/```json|```/g, '')
     .trim();
