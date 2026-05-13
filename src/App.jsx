@@ -361,7 +361,8 @@ export default function SunoLyricsCreator() {
               required: ['title', 'lyrics', 'stylePrompt'],
             },
             temperature: 1.0,
-            maxOutputTokens: 4096,
+            maxOutputTokens: 8192,
+            thinkingConfig: { thinkingBudget: 0 },
           },
         }),
       });
@@ -378,12 +379,26 @@ export default function SunoLyricsCreator() {
       }
 
       const data = await response.json();
+      const finishReason = data?.candidates?.[0]?.finishReason;
       const text = (data?.candidates?.[0]?.content?.parts || [])
         .map((p) => p.text || '')
         .join('')
         .replace(/```json|```/g, '')
         .trim();
-      const parsed = JSON.parse(text);
+
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch (parseErr) {
+        if (finishReason === 'MAX_TOKENS') {
+          throw new Error('The song got cut off mid-line. Try a shorter structure or simpler direction notes.');
+        }
+        if (finishReason === 'SAFETY') {
+          throw new Error('Gemini blocked the response on safety grounds. Try rephrasing the subject.');
+        }
+        console.error('JSON parse failed. Raw text:', text);
+        throw new Error('The model returned malformed JSON. Try generating again.');
+      }
       setResult(parsed);
     } catch (e) {
       console.error(e);
