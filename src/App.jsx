@@ -76,6 +76,55 @@ const PROVIDERS = {
   },
 };
 const PROVIDER_ORDER = ['gemini', 'groq', 'openai'];
+
+const PROVIDER_WIZARDS = {
+  gemini: [
+    { text: 'Click "Open Google AI Studio" below. It opens in a new tab — keep this tab open too.', cta: { label: 'Open Google AI Studio', url: 'https://aistudio.google.com/app/apikey' } },
+    { text: 'Sign in with your Google account (same one as Gmail works fine). Accept the terms if first time.' },
+    { text: 'Click the blue "Create API key" button in the top-right area.' },
+    { text: 'If asked, choose "Create API key in new project" — Google will spin one up automatically.' },
+    { text: 'A key starting with "AIzaSy…" appears. Click the copy icon next to it.' },
+    { text: 'Come back to this tab, paste it into the field below, and click Save key. I\'ll verify it works automatically.' },
+  ],
+  groq: [
+    { text: 'Click "Open Groq Console" below to open it in a new tab.', cta: { label: 'Open Groq Console', url: 'https://console.groq.com/keys' } },
+    { text: 'Sign up or sign in (Google / GitHub / email all work — no credit card needed).' },
+    { text: 'Click "Create API Key", give it a name like "Lyric Foundry".' },
+    { text: 'A key starting with "gsk_…" appears. Copy it now — Groq only shows it once.' },
+    { text: 'Paste it into the field below and click Save key. Validation runs automatically.' },
+  ],
+  openai: [
+    { text: 'Click "Open OpenAI Dashboard" below.', cta: { label: 'Open OpenAI Dashboard', url: 'https://platform.openai.com/api-keys' } },
+    { text: 'Sign in. Important: OpenAI requires a funded account — you\'ll need at least $5 of credit added under Billing.' },
+    { text: 'Click "+ Create new secret key", name it "Lyric Foundry", choose all permissions or just chat completions.' },
+    { text: 'A key starting with "sk-…" appears. Copy it now — OpenAI only shows it once.' },
+    { text: 'Paste it into the field below and click Save key. Validation runs automatically.' },
+  ],
+};
+
+async function validateKey(providerId, apiKey) {
+  const provider = PROVIDERS[providerId];
+  try {
+    let url, init;
+    if (provider.id === 'gemini') {
+      url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`;
+      init = { method: 'GET' };
+    } else if (provider.id === 'groq') {
+      url = 'https://api.groq.com/openai/v1/models';
+      init = { method: 'GET', headers: { Authorization: `Bearer ${apiKey}` } };
+    } else if (provider.id === 'openai') {
+      url = 'https://api.openai.com/v1/models';
+      init = { method: 'GET', headers: { Authorization: `Bearer ${apiKey}` } };
+    }
+    const res = await fetch(url, init);
+    if (res.ok) return { ok: true };
+    if (res.status === 401 || res.status === 403) return { ok: false, reason: 'The provider rejected this key. Double-check you copied the whole thing.' };
+    if (res.status === 429) return { ok: false, reason: 'The key works but you\'re currently rate-limited. Try generating in a minute.' };
+    return { ok: false, reason: `Provider returned status ${res.status}.` };
+  } catch {
+    return { ok: false, reason: 'Network error while validating. Check your connection.' };
+  }
+}
 const ACTIVE_PROVIDER_STORAGE = 'lyric-foundry/active-provider';
 const USAGE_STORAGE = 'lyric-foundry/usage';
 
@@ -383,6 +432,8 @@ export default function SunoLyricsCreator() {
   const [keySaved, setKeySaved] = useState(false);
   const [usage, setUsage] = useState({ date: todayKey(), counts: {} });
   const [rateLimitedProvider, setRateLimitedProvider] = useState(null);
+  const [keyValidation, setKeyValidation] = useState({});
+  const [showWizard, setShowWizard] = useState(false);
 
   useEffect(() => {
     try {
@@ -450,25 +501,39 @@ export default function SunoLyricsCreator() {
     return out;
   };
 
-  const saveKey = () => {
+  const saveKey = async () => {
     const trimmed = keyDraft.trim();
-    try {
-      if (trimmed) localStorage.setItem(activeProvider.storage, trimmed);
-      else localStorage.removeItem(activeProvider.storage);
-    } catch {
-      // ignore
+    if (!trimmed) {
+      try { localStorage.removeItem(activeProvider.storage); } catch { /* */ }
+      setKeys((prev) => ({ ...prev, [provider]: '' }));
+      setKeyValidation((v) => ({ ...v, [provider]: { state: 'unchecked' } }));
+      return;
     }
+
+    setKeyValidation((v) => ({ ...v, [provider]: { state: 'checking' } }));
+    const result = await validateKey(provider, trimmed);
+    if (!result.ok) {
+      setKeyValidation((v) => ({ ...v, [provider]: { state: 'invalid', reason: result.reason } }));
+      return;
+    }
+    try { localStorage.setItem(activeProvider.storage, trimmed); } catch { /* */ }
     setKeys((prev) => ({ ...prev, [provider]: trimmed }));
+    setKeyValidation((v) => ({ ...v, [provider]: { state: 'valid' } }));
     setKeySaved(true);
-    setTimeout(() => setKeySaved(false), 1800);
-    if (trimmed) setShowKeyPanel(false);
+    setTimeout(() => setKeySaved(false), 2400);
   };
 
   const clearKey = () => {
     setKeyDraft('');
     setKeys((prev) => ({ ...prev, [provider]: '' }));
+    setKeyValidation((v) => ({ ...v, [provider]: { state: 'unchecked' } }));
     try { localStorage.removeItem(activeProvider.storage); } catch { /* */ }
   };
+
+  const songsRemaining = activeProvider.softDailyLimit != null
+    ? Math.max(0, activeProvider.softDailyLimit - todayCount)
+    : null;
+  const currentValidation = keyValidation[provider] || { state: activeKey ? 'valid' : 'unchecked' };
 
   const bumpUsage = () => {
     setUsage((prev) => {
@@ -984,6 +1049,140 @@ export default function SunoLyricsCreator() {
           margin: 0 0.1rem;
         }
         .rate-limit-switch:hover { background: var(--dark); color: var(--cream); }
+
+        .wizard-toggle-row {
+          display: flex; gap: 0.5rem; flex-wrap: wrap;
+          margin-top: 0.2rem; margin-bottom: 0.4rem;
+        }
+        .wizard-toggle-active {
+          background: var(--dark) !important;
+          color: var(--cream) !important;
+          border-color: var(--dark) !important;
+        }
+        .wizard-steps {
+          list-style: none; margin: 0.2rem 0 0.6rem;
+          padding: 1.1rem 1.2rem;
+          background: var(--cream);
+          border: 1.5px solid var(--light-gray);
+          border-radius: 12px;
+          display: flex; flex-direction: column; gap: 0.85rem;
+          counter-reset: wizard-counter;
+        }
+        .wizard-step {
+          display: flex; gap: 0.85rem; align-items: flex-start;
+        }
+        .wizard-num {
+          flex-shrink: 0;
+          width: 26px; height: 26px;
+          border-radius: 50%;
+          background: var(--orange); color: var(--cream);
+          font-family: 'Poppins', sans-serif;
+          font-weight: 700; font-size: 0.82rem;
+          display: inline-flex; align-items: center; justify-content: center;
+        }
+        .wizard-body {
+          flex: 1; display: flex; flex-direction: column; gap: 0.45rem;
+        }
+        .wizard-text {
+          font-family: 'Lora', Georgia, serif;
+          font-size: 0.96rem;
+          line-height: 1.5; color: var(--dark);
+        }
+        .wizard-cta {
+          align-self: flex-start;
+          font-family: 'Poppins', sans-serif;
+          font-size: 0.82rem; font-weight: 600;
+          background: var(--dark); color: var(--cream);
+          padding: 0.45rem 0.9rem;
+          border-radius: 999px;
+          text-decoration: none;
+          transition: background 0.2s ease;
+        }
+        .wizard-cta:hover { background: var(--orange); }
+
+        .validation-row {
+          margin-top: 0.5rem;
+          font-family: 'Poppins', sans-serif;
+          font-size: 0.82rem;
+          font-weight: 500;
+        }
+        .val-msg { display: inline-flex; align-items: center; gap: 0.4rem; }
+        .val-checking { color: var(--mid); font-style: italic; }
+        .val-ok { color: var(--green); }
+        .val-bad { color: var(--orange-deep); }
+        .val-idle { color: var(--mid); }
+
+        .remaining-card {
+          margin-top: 2.5rem;
+          padding: 1.4rem 1.6rem;
+          background: linear-gradient(135deg, var(--cream-deep) 0%, var(--cream) 100%);
+          border: 1.5px solid var(--green);
+          border-radius: 18px;
+          display: flex; gap: 1.4rem;
+          justify-content: space-between; align-items: center;
+          flex-wrap: wrap;
+        }
+        .remaining-card.empty {
+          border-color: var(--orange);
+          background: linear-gradient(135deg, rgba(217, 119, 87, 0.12) 0%, rgba(217, 119, 87, 0.04) 100%);
+        }
+        .remaining-left { display: flex; flex-direction: column; gap: 0.3rem; }
+        .remaining-label {
+          font-family: 'Poppins', sans-serif;
+          font-size: 0.7rem;
+          letter-spacing: 0.15em;
+          text-transform: uppercase;
+          color: var(--mid);
+          font-weight: 600;
+        }
+        .remaining-big {
+          font-family: 'Poppins', sans-serif;
+          font-size: 2.6rem;
+          font-weight: 700;
+          color: var(--green);
+          line-height: 1;
+          letter-spacing: -0.02em;
+        }
+        .remaining-card.empty .remaining-big { color: var(--orange-deep); }
+        .remaining-of {
+          font-size: 1rem;
+          font-weight: 500;
+          color: var(--mid);
+          margin-left: 0.2rem;
+        }
+        .remaining-paid {
+          color: var(--dark) !important;
+          font-size: 1.4rem;
+          display: flex; flex-direction: column; gap: 0.2rem;
+        }
+        .remaining-paid-headline {
+          font-size: 1.4rem; font-weight: 700; color: var(--dark);
+        }
+        .remaining-paid-sub {
+          font-family: 'Lora', Georgia, serif; font-style: italic;
+          font-size: 0.9rem; color: var(--mid); font-weight: 400;
+        }
+        .remaining-right {
+          flex: 1; min-width: 220px;
+          display: flex; flex-direction: column; align-items: flex-end; gap: 0.3rem;
+          text-align: right;
+        }
+        .remaining-provider {
+          font-family: 'Poppins', sans-serif;
+          font-size: 0.85rem; font-weight: 600; color: var(--dark);
+        }
+        .remaining-meta {
+          font-family: 'Lora', Georgia, serif;
+          font-size: 0.82rem;
+          font-style: italic;
+          color: var(--mid);
+          line-height: 1.5;
+          max-width: 320px;
+        }
+        @media (max-width: 640px) {
+          .remaining-card { flex-direction: column; align-items: flex-start; }
+          .remaining-right { align-items: flex-start; text-align: left; }
+        }
 
         .hero { margin-bottom: 2.4rem; position: relative; }
         .hero-eyebrow {
@@ -1552,13 +1751,49 @@ export default function SunoLyricsCreator() {
               </div>
 
               <p>
-                <strong>{activeProvider.label}:</strong> {activeProvider.note} Get a key at{' '}
-                <a href={activeProvider.keyUrl} target="_blank" rel="noreferrer">
-                  {activeProvider.keyUrl.replace(/^https?:\/\//, '')}
-                </a>
-                . The key is stored only in your browser's localStorage and is sent directly to {activeProvider.label} —
-                never to any server this app controls.
+                <strong>{activeProvider.label}:</strong> {activeProvider.note} The key is stored only in your browser's
+                localStorage and is sent directly to {activeProvider.label} — never to any server this app controls.
               </p>
+
+              <div className="wizard-toggle-row">
+                <button
+                  className={`btn-ghost ${showWizard ? 'wizard-toggle-active' : ''}`}
+                  onClick={() => setShowWizard((v) => !v)}
+                >
+                  {showWizard ? '× Hide step-by-step guide' : '✦ Help me get a key (step-by-step)'}
+                </button>
+                <a
+                  className="btn-ghost"
+                  href={activeProvider.keyUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Open {activeProvider.label} dashboard ↗
+                </a>
+              </div>
+
+              {showWizard && (
+                <ol className="wizard-steps">
+                  {PROVIDER_WIZARDS[provider].map((step, idx) => (
+                    <li key={idx} className="wizard-step">
+                      <span className="wizard-num">{idx + 1}</span>
+                      <div className="wizard-body">
+                        <div className="wizard-text">{step.text}</div>
+                        {step.cta && (
+                          <a
+                            className="wizard-cta"
+                            href={step.cta.url}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {step.cta.label} ↗
+                          </a>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              )}
 
               <div className="key-row">
                 <input
@@ -1566,13 +1801,20 @@ export default function SunoLyricsCreator() {
                   className="key-input"
                   placeholder={activeProvider.keyHint}
                   value={keyDraft}
-                  onChange={(e) => setKeyDraft(e.target.value)}
+                  onChange={(e) => {
+                    setKeyDraft(e.target.value);
+                    setKeyValidation((v) => ({ ...v, [provider]: { state: 'unchecked' } }));
+                  }}
                   spellCheck="false"
                   autoCorrect="off"
                   autoCapitalize="none"
                 />
-                <button className="btn-solid" onClick={saveKey}>
-                  {keySaved ? '✓ Saved' : 'Save key'}
+                <button
+                  className="btn-solid"
+                  onClick={saveKey}
+                  disabled={currentValidation.state === 'checking'}
+                >
+                  {currentValidation.state === 'checking' ? 'Checking…' : keySaved ? '✓ Saved & verified' : 'Save & verify key'}
                 </button>
                 {activeKey && (
                   <button className="btn-ghost danger" onClick={clearKey}>
@@ -1580,9 +1822,24 @@ export default function SunoLyricsCreator() {
                   </button>
                 )}
               </div>
-              <div className="key-meta-row">
-                <span>Stored in your browser only.</span>
-                {activeKey && <span className="saved">✓ Key active · {keyPreview}</span>}
+
+              <div className="validation-row">
+                {currentValidation.state === 'checking' && (
+                  <span className="val-msg val-checking">Pinging {activeProvider.label}…</span>
+                )}
+                {currentValidation.state === 'valid' && activeKey && (
+                  <span className="val-msg val-ok">
+                    ✓ Key verified · {keyPreview} · stored in your browser only
+                  </span>
+                )}
+                {currentValidation.state === 'invalid' && (
+                  <span className="val-msg val-bad">
+                    ✗ {currentValidation.reason}
+                  </span>
+                )}
+                {currentValidation.state === 'unchecked' && !activeKey && (
+                  <span className="val-msg val-idle">Not set — paste a key above to get started.</span>
+                )}
               </div>
 
               <div className="usage-block">
@@ -1888,6 +2145,33 @@ export default function SunoLyricsCreator() {
                   onChange={(e) => setNotes(e.target.value)}
                 />
               </section>
+
+              {activeKey && (
+                <div className={`remaining-card ${songsRemaining === 0 ? 'empty' : ''}`}>
+                  <div className="remaining-left">
+                    <div className="remaining-label">Songs left today</div>
+                    {songsRemaining != null ? (
+                      <div className="remaining-big">
+                        {songsRemaining}
+                        <span className="remaining-of"> / {activeProvider.softDailyLimit}</span>
+                      </div>
+                    ) : (
+                      <div className="remaining-big remaining-paid">
+                        <span className="remaining-paid-headline">Pay-as-you-go</span>
+                        <span className="remaining-paid-sub">~$0.001 per song · {todayCount} created today</span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="remaining-right">
+                    <div className="remaining-provider">{activeProvider.label}</div>
+                    <div className="remaining-meta">
+                      {songsRemaining != null
+                        ? `Soft cap on the ${activeProvider.label} free tier — resets daily. Count is per-browser and approximate.`
+                        : 'Billed directly by OpenAI on your account.'}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <div className="generate-block">
                 <div className="generate-block-text">
