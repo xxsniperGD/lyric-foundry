@@ -37,8 +37,142 @@ const LOADING_PHRASES = [
   'pressing the master',
 ];
 
-const API_KEY_STORAGE = 'lyric-foundry/gemini-key';
-const MODEL = 'gemini-2.5-flash';
+const PROVIDERS = {
+  gemini: {
+    id: 'gemini',
+    label: 'Google Gemini',
+    badge: 'Free tier · no card',
+    model: 'gemini-2.5-flash',
+    keyUrl: 'https://aistudio.google.com/app/apikey',
+    keyHint: 'AIzaSy…',
+    softDailyLimit: 250,
+    softMinuteLimit: 10,
+    note: 'Free tier on gemini-2.5-flash. Quotas reset daily. No credit card required.',
+    storage: 'lyric-foundry/gemini-key',
+  },
+  groq: {
+    id: 'groq',
+    label: 'Groq (Llama)',
+    badge: 'Free tier · very fast',
+    model: 'llama-3.3-70b-versatile',
+    keyUrl: 'https://console.groq.com/keys',
+    keyHint: 'gsk_…',
+    softDailyLimit: 1000,
+    softMinuteLimit: 30,
+    note: 'Generous free tier running Llama 3.3 70B. Extremely fast — usually ~1s per song.',
+    storage: 'lyric-foundry/groq-key',
+  },
+  openai: {
+    id: 'openai',
+    label: 'OpenAI',
+    badge: 'Paid · pay-as-you-go',
+    model: 'gpt-4o-mini',
+    keyUrl: 'https://platform.openai.com/api-keys',
+    keyHint: 'sk-…',
+    softDailyLimit: null,
+    softMinuteLimit: null,
+    note: 'GPT-4o-mini. Pay-as-you-go, roughly $0.001 per song. Needs a funded OpenAI account.',
+    storage: 'lyric-foundry/openai-key',
+  },
+};
+const PROVIDER_ORDER = ['gemini', 'groq', 'openai'];
+const ACTIVE_PROVIDER_STORAGE = 'lyric-foundry/active-provider';
+const USAGE_STORAGE = 'lyric-foundry/usage';
+
+function todayKey() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function loadUsage() {
+  try {
+    const raw = localStorage.getItem(USAGE_STORAGE);
+    if (!raw) return { date: todayKey(), counts: {} };
+    const parsed = JSON.parse(raw);
+    if (parsed.date !== todayKey()) return { date: todayKey(), counts: {} };
+    return parsed;
+  } catch {
+    return { date: todayKey(), counts: {} };
+  }
+}
+
+function saveUsage(usage) {
+  try { localStorage.setItem(USAGE_STORAGE, JSON.stringify(usage)); } catch { /* */ }
+}
+
+async function callLLM(providerId, apiKey, prompt) {
+  const provider = PROVIDERS[providerId];
+  if (!provider) throw new Error(`Unknown provider: ${providerId}`);
+
+  if (provider.id === 'gemini') {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${provider.model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: 'OBJECT',
+            properties: {
+              title: { type: 'STRING' },
+              lyrics: { type: 'STRING' },
+              stylePrompt: { type: 'STRING' },
+            },
+            required: ['title', 'lyrics', 'stylePrompt'],
+          },
+          temperature: 1.0,
+          maxOutputTokens: 8192,
+          thinkingConfig: { thinkingBudget: 0 },
+        },
+      }),
+    });
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      return { ok: false, status: response.status, errText };
+    }
+    const data = await response.json();
+    const finishReason = data?.candidates?.[0]?.finishReason;
+    const text = (data?.candidates?.[0]?.content?.parts || [])
+      .map((p) => p.text || '').join('').replace(/```json|```/g, '').trim();
+    return { ok: true, text, finishReason };
+  }
+
+  // OpenAI-compatible (groq, openai)
+  const url = provider.id === 'groq'
+    ? 'https://api.groq.com/openai/v1/chat/completions'
+    : 'https://api.openai.com/v1/chat/completions';
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: provider.model,
+      messages: [
+        { role: 'system', content: 'You are a skilled lyricist. Respond ONLY with valid JSON matching the schema described by the user. No prose, no markdown fences.' },
+        { role: 'user', content: prompt },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 1.0,
+      max_tokens: 4096,
+    }),
+  });
+  if (!response.ok) {
+    const errText = await response.text().catch(() => '');
+    return { ok: false, status: response.status, errText };
+  }
+  const data = await response.json();
+  const finishReason = data?.choices?.[0]?.finish_reason;
+  const text = (data?.choices?.[0]?.message?.content || '').replace(/```json|```/g, '').trim();
+  return { ok: true, text, finishReason };
+}
 
 const CRAFT_RULES = `
 CRAFT RULES — these are mandatory, not suggestions:
@@ -241,22 +375,43 @@ export default function SunoLyricsCreator() {
   const [copiedLyrics, setCopiedLyrics] = useState(false);
   const [copiedStyle, setCopiedStyle] = useState(false);
 
-  const [apiKey, setApiKey] = useState('');
-  const [apiKeyDraft, setApiKeyDraft] = useState('');
+  const [provider, setProvider] = useState('gemini');
+  const [keys, setKeys] = useState({});
+  const [keyDraft, setKeyDraft] = useState('');
   const [showKeyPanel, setShowKeyPanel] = useState(false);
   const [showWhyBetter, setShowWhyBetter] = useState(false);
   const [keySaved, setKeySaved] = useState(false);
+  const [usage, setUsage] = useState({ date: todayKey(), counts: {} });
+  const [rateLimitedProvider, setRateLimitedProvider] = useState(null);
 
   useEffect(() => {
     try {
-      const stored = localStorage.getItem(API_KEY_STORAGE) || '';
-      setApiKey(stored);
-      setApiKeyDraft(stored);
-      if (!stored) setShowKeyPanel(true);
+      const loadedKeys = {};
+      for (const id of PROVIDER_ORDER) {
+        loadedKeys[id] = localStorage.getItem(PROVIDERS[id].storage) || '';
+      }
+      setKeys(loadedKeys);
+      const savedProvider = localStorage.getItem(ACTIVE_PROVIDER_STORAGE);
+      const initialProvider = PROVIDERS[savedProvider] ? savedProvider : 'gemini';
+      setProvider(initialProvider);
+      setKeyDraft(loadedKeys[initialProvider] || '');
+      const anyKey = Object.values(loadedKeys).some(Boolean);
+      if (!anyKey) setShowKeyPanel(true);
+      setUsage(loadUsage());
     } catch {
-      // localStorage may be unavailable in some embeds
+      // localStorage may be unavailable
     }
   }, []);
+
+  useEffect(() => {
+    setKeyDraft(keys[provider] || '');
+    try { localStorage.setItem(ACTIVE_PROVIDER_STORAGE, provider); } catch { /* */ }
+  }, [provider, keys]);
+
+  const activeProvider = PROVIDERS[provider];
+  const activeKey = keys[provider] || '';
+  const todayCount = usage.counts[provider] || 0;
+  const isAtSoftLimit = activeProvider.softDailyLimit != null && todayCount >= activeProvider.softDailyLimit;
 
   useEffect(() => {
     if (!loading) return;
@@ -296,28 +451,40 @@ export default function SunoLyricsCreator() {
   };
 
   const saveKey = () => {
-    const trimmed = apiKeyDraft.trim();
+    const trimmed = keyDraft.trim();
     try {
-      if (trimmed) localStorage.setItem(API_KEY_STORAGE, trimmed);
-      else localStorage.removeItem(API_KEY_STORAGE);
+      if (trimmed) localStorage.setItem(activeProvider.storage, trimmed);
+      else localStorage.removeItem(activeProvider.storage);
     } catch {
       // ignore
     }
-    setApiKey(trimmed);
+    setKeys((prev) => ({ ...prev, [provider]: trimmed }));
     setKeySaved(true);
     setTimeout(() => setKeySaved(false), 1800);
     if (trimmed) setShowKeyPanel(false);
   };
 
   const clearKey = () => {
-    setApiKeyDraft('');
-    setApiKey('');
-    try { localStorage.removeItem(API_KEY_STORAGE); } catch { /* */ }
+    setKeyDraft('');
+    setKeys((prev) => ({ ...prev, [provider]: '' }));
+    try { localStorage.removeItem(activeProvider.storage); } catch { /* */ }
+  };
+
+  const bumpUsage = () => {
+    setUsage((prev) => {
+      const fresh = prev.date === todayKey() ? prev : { date: todayKey(), counts: {} };
+      const next = {
+        date: fresh.date,
+        counts: { ...fresh.counts, [provider]: (fresh.counts[provider] || 0) + 1 },
+      };
+      saveUsage(next);
+      return next;
+    });
   };
 
   const generate = async () => {
-    if (!apiKey) {
-      setError('Add your Gemini API key first — top right of the page.');
+    if (!activeKey) {
+      setError(`Add your ${activeProvider.label} API key first — click the key pill in the top right.`);
       setShowKeyPanel(true);
       return;
     }
@@ -326,6 +493,7 @@ export default function SunoLyricsCreator() {
       return;
     }
     setError('');
+    setRateLimitedProvider(null);
     setLoading(true);
     setResult(null);
 
@@ -343,63 +511,38 @@ export default function SunoLyricsCreator() {
         notes,
         styleSetsTone,
       });
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: 'OBJECT',
-              properties: {
-                title: { type: 'STRING' },
-                lyrics: { type: 'STRING' },
-                stylePrompt: { type: 'STRING' },
-              },
-              required: ['title', 'lyrics', 'stylePrompt'],
-            },
-            temperature: 1.0,
-            maxOutputTokens: 8192,
-            thinkingConfig: { thinkingBudget: 0 },
-          },
-        }),
-      });
 
-      if (!response.ok) {
-        const errText = await response.text().catch(() => '');
-        if (response.status === 400 && errText.includes('API_KEY')) {
-          throw new Error('That API key was rejected. Double-check it at aistudio.google.com/app/apikey.');
+      const result = await callLLM(provider, activeKey, prompt);
+
+      if (!result.ok) {
+        if (result.status === 401 || (result.status === 400 && /api[_ ]?key/i.test(result.errText || ''))) {
+          throw new Error(`That ${activeProvider.label} key was rejected. Check it at ${activeProvider.keyUrl}.`);
         }
-        if (response.status === 429) {
-          throw new Error("Hit Gemini's rate limit. Wait a minute and try again.");
+        if (result.status === 429) {
+          setRateLimitedProvider(provider);
+          throw new Error(`You've hit ${activeProvider.label}'s rate limit. ${activeProvider.softDailyLimit ? `Free tier resets daily (~${activeProvider.softDailyLimit} req/day).` : 'Wait a moment and try again.'} You can also switch to another provider in the key panel.`);
         }
-        throw new Error(`Gemini returned ${response.status}.`);
+        if (result.status === 402 || /insufficient|billing/i.test(result.errText || '')) {
+          throw new Error(`${activeProvider.label} reports your account is out of credit / billing isn't set up. Add credit or switch provider.`);
+        }
+        throw new Error(`${activeProvider.label} returned ${result.status}. ${result.errText ? '' : 'Try again.'}`);
       }
-
-      const data = await response.json();
-      const finishReason = data?.candidates?.[0]?.finishReason;
-      const text = (data?.candidates?.[0]?.content?.parts || [])
-        .map((p) => p.text || '')
-        .join('')
-        .replace(/```json|```/g, '')
-        .trim();
 
       let parsed;
       try {
-        parsed = JSON.parse(text);
+        parsed = JSON.parse(result.text);
       } catch (parseErr) {
-        if (finishReason === 'MAX_TOKENS') {
+        if (result.finishReason === 'MAX_TOKENS' || result.finishReason === 'length') {
           throw new Error('The song got cut off mid-line. Try a shorter structure or simpler direction notes.');
         }
-        if (finishReason === 'SAFETY') {
-          throw new Error('Gemini blocked the response on safety grounds. Try rephrasing the subject.');
+        if (result.finishReason === 'SAFETY' || result.finishReason === 'content_filter') {
+          throw new Error(`${activeProvider.label} blocked the response on safety grounds. Try rephrasing the subject.`);
         }
-        console.error('JSON parse failed. Raw text:', text);
+        console.error('JSON parse failed. Raw text:', result.text);
         throw new Error('The model returned malformed JSON. Try generating again.');
       }
       setResult(parsed);
+      bumpUsage();
     } catch (e) {
       console.error(e);
       setError(e.message || 'Hit a snag. Try generating again.');
@@ -471,7 +614,8 @@ export default function SunoLyricsCreator() {
     });
   };
 
-  const keyPreview = apiKey ? `${apiKey.slice(0, 6)}…${apiKey.slice(-4)}` : 'not set';
+  const keyPreview = activeKey ? `${activeKey.slice(0, 6)}…${activeKey.slice(-4)}` : 'not set';
+  const providersWithKeys = PROVIDER_ORDER.filter((id) => keys[id]);
 
   return (
     <>
@@ -701,6 +845,145 @@ export default function SunoLyricsCreator() {
           opacity: 1 !important;
           line-height: 1.55;
         }
+
+        .provider-tabs {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 0.55rem;
+          margin: 0.2rem 0 0.4rem;
+        }
+        .provider-tab {
+          font-family: 'Poppins', sans-serif;
+          background: var(--cream);
+          border: 1.5px solid var(--light-gray);
+          border-radius: 12px;
+          padding: 0.7rem 0.9rem;
+          cursor: pointer;
+          text-align: left;
+          transition: all 0.2s ease;
+          display: flex; flex-direction: column; gap: 0.18rem;
+          position: relative;
+          color: var(--dark);
+        }
+        .provider-tab:hover { border-color: var(--dark); }
+        .provider-tab.active {
+          background: var(--dark); color: var(--cream); border-color: var(--dark);
+        }
+        .provider-tab-name {
+          font-size: 0.92rem; font-weight: 600;
+        }
+        .provider-tab-badge {
+          font-size: 0.66rem; letter-spacing: 0.08em;
+          text-transform: uppercase; font-weight: 500;
+          opacity: 0.65;
+        }
+        .provider-tab.active .provider-tab-badge { color: var(--orange-soft); opacity: 1; }
+        .provider-tab-check {
+          position: absolute; top: 0.5rem; right: 0.65rem;
+          color: var(--green); font-weight: 700; font-size: 0.85rem;
+        }
+        .provider-tab.active .provider-tab-check { color: var(--orange-soft); }
+
+        .usage-block {
+          margin-top: 0.6rem;
+          padding: 1rem 1.1rem;
+          background: var(--cream);
+          border: 1px solid var(--light-gray);
+          border-radius: 12px;
+        }
+        .usage-head {
+          display: flex; justify-content: space-between; align-items: baseline;
+          margin-bottom: 0.7rem; flex-wrap: wrap; gap: 0.4rem;
+        }
+        .usage-title {
+          font-family: 'Poppins', sans-serif;
+          font-size: 0.78rem;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+          font-weight: 600;
+          color: var(--dark);
+        }
+        .usage-disclaimer {
+          font-family: 'Lora', Georgia, serif;
+          font-style: italic;
+          font-size: 0.78rem;
+          color: var(--mid);
+        }
+        .usage-rows { display: flex; flex-direction: column; gap: 0.7rem; }
+        .usage-row.limited {
+          padding: 0.4rem 0.6rem;
+          background: rgba(217, 119, 87, 0.07);
+          border-radius: 8px;
+          margin: -0.2rem -0.3rem;
+        }
+        .usage-row-head {
+          display: flex; justify-content: space-between; align-items: baseline;
+          margin-bottom: 0.3rem; gap: 0.6rem; flex-wrap: wrap;
+        }
+        .usage-name {
+          font-family: 'Poppins', sans-serif;
+          font-size: 0.88rem;
+          font-weight: 600; color: var(--dark);
+        }
+        .usage-count {
+          font-family: 'Poppins', sans-serif;
+          font-size: 0.76rem;
+          color: var(--mid);
+        }
+        .usage-bar {
+          width: 100%; height: 6px;
+          background: var(--light-gray);
+          border-radius: 999px; overflow: hidden;
+        }
+        .usage-bar-fill {
+          height: 100%;
+          background: var(--green);
+          border-radius: 999px;
+          transition: width 0.3s ease;
+        }
+        .usage-bar-fill.warn { background: var(--orange); }
+        .usage-bar-fill.full { background: var(--orange-deep); }
+        .usage-limit-msg {
+          margin-top: 0.4rem;
+          font-family: 'Lora', Georgia, serif;
+          font-style: italic;
+          font-size: 0.82rem;
+          color: var(--orange-deep);
+        }
+
+        .rate-limit-banner {
+          margin-top: 1.2rem;
+          padding: 1rem 1.2rem;
+          background: rgba(217, 119, 87, 0.12);
+          border: 1.5px solid var(--orange);
+          border-radius: 14px;
+        }
+        .rate-limit-head {
+          font-family: 'Poppins', sans-serif;
+          font-size: 0.88rem;
+          font-weight: 700;
+          color: var(--orange-deep);
+          margin-bottom: 0.3rem;
+        }
+        .rate-limit-body {
+          font-family: 'Lora', Georgia, serif;
+          font-size: 0.95rem;
+          color: var(--dark);
+          line-height: 1.55;
+        }
+        .rate-limit-switch {
+          font-family: 'Poppins', sans-serif;
+          font-size: 0.85rem;
+          font-weight: 600;
+          background: var(--cream);
+          color: var(--dark);
+          border: 1.5px solid var(--dark);
+          border-radius: 999px;
+          padding: 0.2rem 0.7rem;
+          cursor: pointer;
+          margin: 0 0.1rem;
+        }
+        .rate-limit-switch:hover { background: var(--dark); color: var(--cream); }
 
         .hero { margin-bottom: 2.4rem; position: relative; }
         .hero-eyebrow {
@@ -1233,35 +1516,57 @@ export default function SunoLyricsCreator() {
             <div className="header-right">
               <Equaliser active={loading} />
               <button
-                className={`key-pill ${apiKey ? 'ok' : 'missing'}`}
+                className={`key-pill ${activeKey ? 'ok' : 'missing'}`}
                 onClick={() => setShowKeyPanel((v) => !v)}
-                title="Your Gemini API key"
+                title="API key and provider settings"
               >
                 <span className="pill-dot" />
-                {apiKey ? `Key · ${keyPreview}` : 'Add API key'}
+                {activeKey
+                  ? `${activeProvider.label} · ${keyPreview}${activeProvider.softDailyLimit ? ` · ${todayCount}/${activeProvider.softDailyLimit}` : ''}`
+                  : 'Add API key'}
               </button>
-              <span className="header-meta">For Suno · v2</span>
+              <span className="header-meta">For Suno · v3</span>
             </div>
           </div>
 
           {showKeyPanel && (
-            <div className={`key-panel ${apiKey ? '' : 'warn'}`}>
-              <h3>Your Gemini API Key {apiKey ? '' : '— required'}</h3>
+            <div className={`key-panel ${activeKey ? '' : 'warn'}`}>
+              <h3>Choose a provider & paste a key {activeKey ? '' : '— required'}</h3>
+
+              <div className="provider-tabs">
+                {PROVIDER_ORDER.map((id) => {
+                  const p = PROVIDERS[id];
+                  const has = !!keys[id];
+                  return (
+                    <button
+                      key={id}
+                      className={`provider-tab ${provider === id ? 'active' : ''} ${has ? 'has-key' : ''}`}
+                      onClick={() => setProvider(id)}
+                    >
+                      <span className="provider-tab-name">{p.label}</span>
+                      <span className="provider-tab-badge">{p.badge}</span>
+                      {has && <span className="provider-tab-check">✓</span>}
+                    </button>
+                  );
+                })}
+              </div>
+
               <p>
-                This app runs on your own Gemini key, called directly from your browser. The key is stored only in your
-                browser's localStorage and is never sent to any server controlled by this site. Get a free key at{' '}
-                <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">
-                  aistudio.google.com/app/apikey
-                </a>{' '}
-                — Google's free tier on <em>gemini-2.5-flash</em> doesn't require a credit card.
+                <strong>{activeProvider.label}:</strong> {activeProvider.note} Get a key at{' '}
+                <a href={activeProvider.keyUrl} target="_blank" rel="noreferrer">
+                  {activeProvider.keyUrl.replace(/^https?:\/\//, '')}
+                </a>
+                . The key is stored only in your browser's localStorage and is sent directly to {activeProvider.label} —
+                never to any server this app controls.
               </p>
+
               <div className="key-row">
                 <input
                   type="password"
                   className="key-input"
-                  placeholder="AIzaSy…"
-                  value={apiKeyDraft}
-                  onChange={(e) => setApiKeyDraft(e.target.value)}
+                  placeholder={activeProvider.keyHint}
+                  value={keyDraft}
+                  onChange={(e) => setKeyDraft(e.target.value)}
                   spellCheck="false"
                   autoCorrect="off"
                   autoCapitalize="none"
@@ -1269,7 +1574,7 @@ export default function SunoLyricsCreator() {
                 <button className="btn-solid" onClick={saveKey}>
                   {keySaved ? '✓ Saved' : 'Save key'}
                 </button>
-                {apiKey && (
+                {activeKey && (
                   <button className="btn-ghost danger" onClick={clearKey}>
                     Clear
                   </button>
@@ -1277,7 +1582,46 @@ export default function SunoLyricsCreator() {
               </div>
               <div className="key-meta-row">
                 <span>Stored in your browser only.</span>
-                {apiKey && <span className="saved">✓ Key active · {keyPreview}</span>}
+                {activeKey && <span className="saved">✓ Key active · {keyPreview}</span>}
+              </div>
+
+              <div className="usage-block">
+                <div className="usage-head">
+                  <span className="usage-title">Today's usage on this browser</span>
+                  <span className="usage-disclaimer">approximate — Google/OpenAI/Groq don't expose remaining-quota directly</span>
+                </div>
+                <div className="usage-rows">
+                  {PROVIDER_ORDER.map((id) => {
+                    const p = PROVIDERS[id];
+                    const n = usage.counts[id] || 0;
+                    const pct = p.softDailyLimit ? Math.min(100, (n / p.softDailyLimit) * 100) : 0;
+                    return (
+                      <div key={id} className={`usage-row ${rateLimitedProvider === id ? 'limited' : ''}`}>
+                        <div className="usage-row-head">
+                          <span className="usage-name">{p.label}</span>
+                          <span className="usage-count">
+                            {p.softDailyLimit
+                              ? `${n} / ${p.softDailyLimit} req/day (free tier soft cap)`
+                              : `${n} req today · pay-as-you-go`}
+                          </span>
+                        </div>
+                        {p.softDailyLimit && (
+                          <div className="usage-bar">
+                            <div
+                              className={`usage-bar-fill ${pct >= 100 ? 'full' : pct >= 80 ? 'warn' : ''}`}
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                        )}
+                        {rateLimitedProvider === id && (
+                          <div className="usage-limit-msg">
+                            ⚠ Provider returned rate-limit (429) on the last request. Switch provider above, or wait for the limit window to reset.
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
 
               <div className="key-warn">
@@ -1548,7 +1892,7 @@ export default function SunoLyricsCreator() {
               <div className="generate-block">
                 <div className="generate-block-text">
                   <h3>Press the lever.</h3>
-                  <p>Gemini writes the lyrics. You take them to Suno.</p>
+                  <p>{activeProvider.label} writes the lyrics. You take them to Suno.</p>
                 </div>
                 <button
                   className="btn-primary"
@@ -1564,6 +1908,39 @@ export default function SunoLyricsCreator() {
                   )}
                 </button>
               </div>
+
+              {rateLimitedProvider && (
+                <div className="rate-limit-banner">
+                  <div className="rate-limit-head">⚠ {PROVIDERS[rateLimitedProvider].label} rate-limited</div>
+                  <div className="rate-limit-body">
+                    You're out of free-tier requests for now.{' '}
+                    {PROVIDER_ORDER.filter((id) => id !== rateLimitedProvider && keys[id]).length > 0 ? (
+                      <>
+                        Try switching to{' '}
+                        {PROVIDER_ORDER.filter((id) => id !== rateLimitedProvider && keys[id])
+                          .map((id) => (
+                            <button
+                              key={id}
+                              className="rate-limit-switch"
+                              onClick={() => { setProvider(id); setRateLimitedProvider(null); }}
+                            >
+                              {PROVIDERS[id].label}
+                            </button>
+                          ))
+                          .reduce((acc, el, i, arr) => acc.concat(i < arr.length - 1 ? [el, ', '] : [el]), [])}
+                        {' '}— you already have a key for it.
+                      </>
+                    ) : (
+                      <>
+                        Add a key for another provider:{' '}
+                        <button className="rate-limit-switch" onClick={() => setShowKeyPanel(true)}>
+                          open key panel
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {error && <div className="error-msg">{error}</div>}
 
@@ -1601,7 +1978,7 @@ export default function SunoLyricsCreator() {
                   </div>
                   <h2 className="release-title">{result.title}</h2>
                   <div className="release-meta">
-                    Written by Gemini · {mergedUnique(genres, customGenres).join(' / ') || 'open genre'}
+                    Written by {activeProvider.label} · {mergedUnique(genres, customGenres).join(' / ') || 'open genre'}
                     {mergedUnique(moods, customMoods).length > 0 && ` · ${mergedUnique(moods, customMoods).join(' / ')}`}
                   </div>
                 </div>
@@ -1660,7 +2037,7 @@ export default function SunoLyricsCreator() {
 
           <div className="footer-bar">
             <span>Lyric Foundry</span>
-            <span>Words by Gemini<span className="heart-dot" />Songs by you</span>
+            <span>Words by AI<span className="heart-dot" />Songs by you</span>
             <span>Pretoria · {new Date().getFullYear()}</span>
           </div>
 
