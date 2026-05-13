@@ -227,8 +227,11 @@ function Equaliser({ active }) {
 export default function SunoLyricsCreator() {
   const [theme, setTheme] = useState('');
   const [genres, setGenres] = useState([]);
+  const [customGenres, setCustomGenres] = useState('');
   const [moods, setMoods] = useState([]);
+  const [customMoods, setCustomMoods] = useState('');
   const [structures, setStructures] = useState([STRUCTURES[0].value]);
+  const [customStructure, setCustomStructure] = useState('');
   const [notes, setNotes] = useState('');
   const [styleSetsTone, setStyleSetsTone] = useState(true);
   const [loading, setLoading] = useState(false);
@@ -273,6 +276,24 @@ export default function SunoLyricsCreator() {
     if (remaining.length === 0) return list;
     return [...list, pickRandom(remaining)];
   };
+  const splitCustom = (text) =>
+    text
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  const mergedUnique = (chips, customText) => {
+    const customList = splitCustom(customText);
+    const seen = new Set();
+    const out = [];
+    for (const v of [...chips, ...customList]) {
+      const k = v.toLowerCase();
+      if (!seen.has(k)) {
+        seen.add(k);
+        out.push(v);
+      }
+    }
+    return out;
+  };
 
   const saveKey = () => {
     const trimmed = apiKeyDraft.trim();
@@ -309,7 +330,19 @@ export default function SunoLyricsCreator() {
     setResult(null);
 
     try {
-      const prompt = buildPrompt({ theme, genres, moods, structures, notes, styleSetsTone });
+      const allGenres = mergedUnique(genres, customGenres);
+      const allMoods = mergedUnique(moods, customMoods);
+      const allStructures = customStructure.trim()
+        ? [...structures, customStructure.trim()]
+        : structures;
+      const prompt = buildPrompt({
+        theme,
+        genres: allGenres,
+        moods: allMoods,
+        structures: allStructures,
+        notes,
+        styleSetsTone,
+      });
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
       const response = await fetch(url, {
         method: 'POST',
@@ -750,6 +783,27 @@ export default function SunoLyricsCreator() {
           color: var(--orange);
           font-weight: 600;
         }
+
+        .custom-input-wrap {
+          margin-top: 1.1rem;
+          display: flex;
+          flex-direction: column;
+          gap: 0.35rem;
+        }
+        .custom-input-label {
+          font-family: 'Poppins', sans-serif;
+          font-size: 0.7rem;
+          letter-spacing: 0.14em;
+          text-transform: uppercase;
+          color: var(--mid);
+          font-weight: 600;
+        }
+        .field-input.custom-input {
+          font-size: 1rem;
+          border-bottom-style: dashed;
+          border-bottom-color: var(--mid);
+        }
+        .field-input.custom-input:focus { border-bottom-color: var(--orange); border-bottom-style: solid; }
 
         .chips { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }
         .chip {
@@ -1210,9 +1264,19 @@ export default function SunoLyricsCreator() {
                     </button>
                   ))}
                 </div>
-                {genres.length > 1 && (
+                <div className="custom-input-wrap">
+                  <span className="custom-input-label">Or write your own</span>
+                  <input
+                    type="text"
+                    className="field-input custom-input"
+                    placeholder="e.g. west-coast g-funk, slowcore, dark cabaret, beach-house hyperpop — comma-separated"
+                    value={customGenres}
+                    onChange={(e) => setCustomGenres(e.target.value)}
+                  />
+                </div>
+                {(genres.length + splitCustom(customGenres).length) > 1 && (
                   <div className="selection-summary">
-                    Blending <strong>{genres.length}</strong> genres — the prompt will tell the model to fuse them honestly.
+                    Blending <strong>{genres.length + splitCustom(customGenres).length}</strong> genres — the prompt will tell the model to fuse them honestly.
                   </div>
                 )}
               </section>
@@ -1245,9 +1309,19 @@ export default function SunoLyricsCreator() {
                     </button>
                   ))}
                 </div>
-                {moods.length > 1 && (
+                <div className="custom-input-wrap">
+                  <span className="custom-input-label">Or write your own</span>
+                  <input
+                    type="text"
+                    className="field-input custom-input"
+                    placeholder="e.g. unbothered, devastating but funny, two-in-the-morning brave — comma-separated"
+                    value={customMoods}
+                    onChange={(e) => setCustomMoods(e.target.value)}
+                  />
+                </div>
+                {(moods.length + splitCustom(customMoods).length) > 1 && (
                   <div className="selection-summary">
-                    Layering <strong>{moods.length}</strong> moods — bittersweet, weary, hopeful can coexist in the same song.
+                    Layering <strong>{moods.length + splitCustom(customMoods).length}</strong> moods — they can coexist in the same song.
                   </div>
                 )}
               </section>
@@ -1276,9 +1350,19 @@ export default function SunoLyricsCreator() {
                     </button>
                   ))}
                 </div>
-                {structures.length > 1 && (
+                <div className="custom-input-wrap">
+                  <span className="custom-input-label">Or describe your own structure</span>
+                  <input
+                    type="text"
+                    className="field-input custom-input"
+                    placeholder="e.g. Intro → Verse → Refrain → Verse → Refrain → Outro Whisper (no chorus)"
+                    value={customStructure}
+                    onChange={(e) => setCustomStructure(e.target.value)}
+                  />
+                </div>
+                {(structures.length + (customStructure.trim() ? 1 : 0)) > 1 && (
                   <div className="selection-summary">
-                    Blending <strong>{structures.length}</strong> structures — the model will pick one as the spine and let the others inform sections.
+                    Blending <strong>{structures.length + (customStructure.trim() ? 1 : 0)}</strong> structures — the model will pick one as the spine and let the others inform sections.
                   </div>
                 )}
 
@@ -1378,8 +1462,8 @@ export default function SunoLyricsCreator() {
                   </div>
                   <h2 className="release-title">{result.title}</h2>
                   <div className="release-meta">
-                    Written by Gemini · {genres.length > 0 ? genres.join(' / ') : 'open genre'}
-                    {moods.length > 0 && ` · ${moods.join(' / ')}`}
+                    Written by Gemini · {mergedUnique(genres, customGenres).join(' / ') || 'open genre'}
+                    {mergedUnique(moods, customMoods).length > 0 && ` · ${mergedUnique(moods, customMoods).join(' / ')}`}
                   </div>
                 </div>
               </div>
